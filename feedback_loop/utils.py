@@ -1,9 +1,9 @@
 import re
-import os
-import pandas as pd
+
 import streamlit as st
-from utils import clean_sql_query, execute_bigquery, generate_sql, recognize_tables  
-# Database schema 
+from google.cloud import bigquery
+from openai import OpenAI
+
 DB_SCHEMAS = {
     "io_benchmark": """
     Table: io_benchmark
@@ -31,8 +31,8 @@ DB_SCHEMAS = {
     - is_ab_test (BOOLEAN): Indicates whether the campaign is part of an A/B test (True/False).
     - start_date_scibids (DATE): Start date of the Scibids campaign.
     - end_date_scibids (DATE): End date of the Scibids campaign.
-    - start_date_control (DATE): Start date of the control group (if A/B test).
-    - end_date_control (DATE): End date of the control group (if A/B test).
+    - start_date_control (DATE): Start date of the control group.
+    - end_date_control (DATE): End date of the control group.
     - scibids_budget_portion (FLOAT): Portion of the budget allocated to Scibids.
     """,
 
@@ -44,12 +44,9 @@ DB_SCHEMAS = {
     - dsp (STRING): Advertising platform used (e.g., DV360).
     - kpi (STRING): Key performance indicator of the campaign (e.g., CTR, CPA, CPM, VTR).
     - region (STRING): Geographic region associated with the campaign (may contain null values).
-
     - weighted_uplift (FLOAT): Weighted performance improvement of the campaign, measured by the relative change in the selected KPI.
-
     - elligible_ios (INT): Number of insertion orders (IOs) eligible for uplift analysis.
     - not_elligible_ios (INT): Number of IOs not eligible for uplift analysis.
-
     - elligible_ab_test (INT): Number of campaigns included in an A/B test.
     - not_elligible_ab_test (INT): Number of campaigns excluded from an A/B test.
     """,
@@ -171,6 +168,8 @@ DB_SCHEMAS = {
     - surcouche_setup (BOOLEAN): Indicates if an overlay is activated.
     - keystone_status (STRING): Describes Scibids activity status on the campaign.
     - addressability (STRING): Determines if the IO is optimizable (addressable) or not.
+    - ab_test_start_date (DATE): Start date of the A/B test.
+    - ab_test_end_date (DATE): End date of the A/B test.
     """,
 
     "t_reach_performance": """
@@ -219,109 +218,130 @@ DB_SCHEMAS = {
 }
 
 
-file_path = "evaluation_dataset.csv"
+OPENAI_API_KEY = "sk-svcacct-qtDEYRpBW0EMwTO4s3UEGcWmXfaXAI3LatYDDSpDmi7qwbsRgnevVDjLiWjyr5hwriDPXT3BlbkFJK9wZJ5pYCsKp71hDmZR5Y0TwBrmo52ZbRtsp0yefXwhToIuBPWcGsv8ZYL6OTxwE5ASAA"
 
-# Vérification et création du fichier CSV s'il n'existe pas
-if not os.path.exists(file_path):
-    with open(file_path, "w") as f:
-        f.write("query,reference_sql\n")  # Création avec en-têtes
+# Initialize the OpenAI client with the API key
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Chargement des requêtes enregistrées
-if os.path.exists(file_path):
-    saved_queries = pd.read_csv(file_path)
-else:
-    saved_queries = pd.DataFrame(columns=["query", "reference_sql"])
+# Set Google Cloud project ID
+PROJECT_ID = "capstone-448012"
 
-# Initialisation de session_state pour éviter le rechargement multiple
-if "query_saved" not in st.session_state:
-    st.session_state.query_saved = False
-if "cleaned_sql_query" not in st.session_state:
-    st.session_state.cleaned_sql_query = ""
-if "hide_save_button" not in st.session_state:
-    st.session_state.hide_save_button = False  # Empêche d'afficher "Save Query" après "Don't Save"
+# Initialize BigQuery Client
+client_bq = bigquery.Client(project=PROJECT_ID)
 
-# Interface Streamlit
-st.set_page_config(page_title="SQL Query Generator", layout="wide")
-st.title("🛠️ SQL Query Generator")
-st.write("Enter a natural language request, and the system will generate the corresponding SQL query.")
+def clean_sql_query(sql_output):
+    """Extracts SQL query and replaces table names with `data.<table_name>`."""
+    
+    # Remove markdown formatting (```sql and ```)
+    sql_cleaned = re.sub(r"```sql|```", "", sql_output).strip()
 
-# Zone de saisie de l'utilisateur
-user_input = st.text_area("Describe your SQL query:", placeholder="Example: Get the average weighted uplift for each DSP and KPI.")
+    # Replace table names with "data.<table_name>"
+    for table in DB_SCHEMAS.keys():
+        sql_cleaned = sql_cleaned.replace(f"{table}", f"data.{table}")
 
-# Bouton "Generate & Run SQL"
-if st.button("Generate & Run SQL", key="generate_sql"):
-    print("✅ Bouton Generate & Run SQL cliqué")  # Debugging
-    if user_input.strip():
-        print("✅ Texte utilisateur détecté")  # Debugging
+    return sql_cleaned
 
-        # Identifier les tables nécessaires pour la requête
-        with st.spinner("Identifying relevant tables..."):
-            selected_tables = recognize_tables(user_input)
-        print(f"📌 Tables identifiées : {selected_tables}")  # Debugging
+def execute_bigquery(sql_query):
+    """Executes an SQL query on BigQuery and returns results if successful."""
+    try:
+        # Check query validity (Dry Run)
+        job_config = bigquery.QueryJobConfig(dry_run=True)
+        query_job = client_bq.query(sql_query, job_config=job_config)
+        st.success("✅ Query is valid! Running execution...")
 
-        if selected_tables:
-            st.subheader("📌 Identified Tables:")
-            st.write(", ".join(selected_tables))
+        # Execute query if valid
+        query_job = client_bq.query(sql_query)
+        results = query_job.result().to_dataframe()
 
-            # Générer la requête SQL
-            with st.spinner("Generating SQL query..."):
-                raw_sql_query = generate_sql(user_input, selected_tables)
-                cleaned_sql_query = clean_sql_query(raw_sql_query)
+        if results.empty:
+            st.warning("⚠️ Query executed successfully but returned no results.")
+        else:
+            st.success("✅ Query executed successfully!")
+            return results
 
-            st.subheader("📝 SQL Query:")
-            st.code(cleaned_sql_query, language="sql")
+    except Exception as e:
+        st.error(f"❌ Query failed: {e}")
+        return None
 
-            # Stocker la requête dans session_state pour être accessible plus tard
-            st.session_state.cleaned_sql_query = cleaned_sql_query
-            st.session_state.hide_save_button = False  # Réactiver le bouton Save
 
-            # Exécuter la requête sur BigQuery
-            with st.spinner("Executing query on BigQuery..."):
-                results = execute_bigquery(cleaned_sql_query)
+def recognize_tables(user_query):
+    """Identify relevant tables from user input."""
+    tables_description = "\n".join([f"Table: {key}\n{value}" for key, value in DB_SCHEMAS.items()])
+    
+    messages = [
+        {"role": "system", "content": "You are an expert in SQL database structures. Given a user request, identify the most relevant tables from the schema provided that will be called in the SQL query."},
+        {"role": "user", "content": f"Available Database Tables:\n{tables_description}\n\nUser Request:\n{user_query}\n\nReturn only the relevant table names, separated by commas."}
+    ]
+    
+    response = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.2)
+    return response.choices[0].message.content.strip().split(", ")
 
-            if results is not None:
-                print("✅ Résultats récupérés")  # Debugging
-                st.subheader("📊 Query Results:")
-                st.dataframe(results)
+# Function to generate an SQL query based on the instruction
+def generate_sql(user_query,selected_tables):
 
-# **Affichage des boutons "Save Query" et "Don't Save" après la génération**
-if st.session_state.cleaned_sql_query and not st.session_state.hide_save_button:
-    col1, col2 = st.columns(2)
+    """Generate an SQL query using the selected tables."""
 
-    with col1:
-        if st.button("💾 Save Query", key="save_button"):
-            print("✅ Bouton Save cliqué")  # Debugging
+    # Define keys for each table (used for joins & conditions)
+    keys_identification = {
+        "io_benchmark": ["group_object_field_id", "dsp", "kpi"],
+        "new_benchmark": ["kpi", "dsp"],
+        "t_daily_io_features": ["dsp", "group_object_field_id", "day_utc"],
+        "t_flights": ["group_object_field_id", "dsp", "object_field_id", "gof_flight_id", "of_flight_id"],
+        "t_insertion_orders": ["group_object_field_id", "dsp"],
+        "t_campaign_performance_day": ["group_object_field_id", "dsp", "object_field_id", "gof_flight_id", "date_hour_tz"],
+        "t_reach_performance": ["group_object_field_id", "dsp", "end_date"],
+        "t_pixel_performance": ["group_object_field_id", "object_field_id", "dsp", "conversion_pixel_id", "date_hour_tz"],
+    }
 
-            # Vérification si la requête est déjà enregistrée
-            if "query" in saved_queries.columns:
-                is_duplicate = saved_queries["query"].astype(str).str.strip().eq(user_input.strip()).any()
-            else:
-                is_duplicate = False
+    # Extract only the relevant keys for the selected tables
+    relevant_keys = "\n".join([f"{table}: {', '.join(keys_identification[table])}" for table in selected_tables if table in keys_identification])
+    relevant_schemas = "\n\n".join([DB_SCHEMAS[table.strip()] for table in selected_tables if table.strip() in DB_SCHEMAS])
+        # Few-shot examples to guide the model clearly
+    few_shot_examples = """
+    # Example 1:
+    User Request: "What is the total amount spent by the client ID_SELECTED?"
+    SQL Query:
+    SELECT client_id, 
+        SUM(revenue_currency) AS spend, 
+        SUM(revenue_usd) AS spend_usd
+    FROM `t_campaign_performance_day`
+    WHERE client_id = 'ID_SELECTED'
+    GROUP BY client_id;
 
-            print(f"🔎 Est-ce un doublon ? {is_duplicate}")  # Debugging
+    # Example 2:
+    User Request: "What are the ongoing A/B tests?"
+    SQL Query:
+    SELECT group_object_field_id, ab_test_start_date, ab_test_end_date
+    FROM `t_insertion_orders`
+    WHERE CURRENT_DATE() BETWEEN ab_test_start_date AND ab_test_end_date;
+    """
 
-            if not is_duplicate:
-                print("✅ Nouvelle requête détectée, enregistrement en cours...")
-                new_entry = pd.DataFrame([{"query": user_input, "reference_sql": st.session_state.cleaned_sql_query}])
-                updated_queries = pd.concat([saved_queries, new_entry], ignore_index=True)
-                updated_queries.to_csv(file_path, index=False)
-                st.success("✅ Query saved successfully!")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert SQL assistant specialized in digital advertising and data analytics. "
+                "Generate only the SQL query while strictly following the provided database schemas and user request.\n"
+                "### Few-Shot Examples:\n"
+                f"{few_shot_examples}\n\n"
+                "### Keys Identification (for joins and filtering):\n"
+                f"{relevant_keys}\n\n"
+                "### Database Schema:\n"
+                f"{relevant_schemas}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Instruction:\n{user_query}\n\nGenerate only the SQL query without explanation.",
+        },
+    ]
 
-                # Mettre à jour session_state pour éviter le double clic
-                st.session_state.query_saved = True
-                st.rerun()
-            else:
-                print("⚠️ Requête déjà enregistrée")  # Debugging
-                st.warning("⚠️ This query is already saved.")
 
-    with col2:
-        if st.button("❌ Don't Save", key="dont_save_button"):
-            print("❌ Bouton Don't Save cliqué")  # Debugging
-            st.session_state.hide_save_button = True
-            st.rerun()
+    # Call OpenAI API to generate the SQL query
+    completion = client.chat.completions.create(
+        model="gpt-4o",  # High-performance model for SQL generation
+        messages=messages,
+        temperature=0.2,  # Low temperature for deterministic output
+    )
 
-# Afficher les requêtes enregistrées
-if os.path.exists(file_path):
-    st.subheader("📂 Saved Queries")
-    saved_data = pd.read_csv(file_path)
-    st.dataframe(saved_data)
+    return completion.choices[0].message.content
