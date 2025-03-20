@@ -218,13 +218,13 @@ DB_SCHEMAS = {
 }
 
 
-OPENAI_API_KEY = "sk-svcacct-qtDEYRpBW0EMwTO4s3UEGcWmXfaXAI3LatYDDSpDmi7qwbsRgnevVDjLiWjyr5hwriDPXT3BlbkFJK9wZJ5pYCsKp71hDmZR5Y0TwBrmo52ZbRtsp0yefXwhToIuBPWcGsv8ZYL6OTxwE5ASAA"
+OPENAI_API_KEY = "*****"
 
 # Initialize the OpenAI client with the API key
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Set Google Cloud project ID
-PROJECT_ID = "capstone-448012"
+PROJECT_ID = "*******"
 
 # Initialize BigQuery Client
 client_bq = bigquery.Client(project=PROJECT_ID)
